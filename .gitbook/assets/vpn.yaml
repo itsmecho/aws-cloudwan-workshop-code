@@ -1,0 +1,537 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "VPC template for simulated on-prem environment. "
+Parameters:
+  InstanceType:
+    AllowedValues:
+    - t2.nano
+    - t2.micro
+    - t2.small
+    - t2.medium
+    - t2.large
+    - t2.xlarge
+    - t2.2xlarge
+    - t3.nano
+    - t3.micro
+    - t3.small
+    - t3.medium
+    - t3.large
+    - t3.xlarge
+    - t3.2xlarge
+    Default: t3.medium
+    Description: CGW EC2 instance type.
+    Type: String
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Mappings: 
+  RegionMap: 
+    us-east-1: 
+      VpcCidr: 172.16.0.0/16
+      TunnelInsideCidr1: '169.254.100.0/30'
+      TunnelInsideCidr2: '169.254.100.4/30'
+      LocalIP1: '169.254.100.2'
+      RemoteIP1: '169.254.100.1'
+      PSK: 'E3nwNcd5681cJYkFq_X3GW8WNSJjufTE'
+      RemoteASN: '64512'
+      LocalASN: '65001'
+    eu-central-1: 
+      VpcCidr: 172.17.0.0/16
+      TunnelInsideCidr1: '169.254.200.0/30'
+      TunnelInsideCidr2: '169.254.200.4/30'
+      LocalIP1: '169.254.200.2'
+      RemoteIP1: '169.254.200.1'
+      PSK: 'E3nwNcd5681cJYkFq_X3GW8WNSJjufTE'
+      RemoteASN: '64513'
+      LocalASN: '65002'
+
+
+Resources:
+  PrivateSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: !Select [ 0, !Cidr [ !GetAtt Vpc.CidrBlock, 3, 5 ]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPrivateSubnet-', !Ref 'AWS::StackName' ] ]
+        - Key: SubnetType
+          Value: Private
+      VpcId: !Ref Vpc
+
+  PrivateSubnetRouteTableAssociation0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet0
+
+  PublicSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: !Select [ 1, !Cidr [ !GetAtt Vpc.CidrBlock, 3, 5 ]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPublicSubnet-', !Ref 'AWS::StackName' ] ]
+        - Key: SubnetType
+          Value: Public
+      VpcId: !Ref Vpc
+  
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 10.0.0.0/8
+      InstanceId: !Ref CGW
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPrivateRouteTable-', !Ref 'AWS::StackName' ] ]
+        - Key: Network
+          Value: Private
+      VpcId: !Ref Vpc
+
+  PublicRouteTableAssociation0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet0
+      RouteTableId: !Ref PublicRouteTable
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremInternetGateway-', !Ref 'AWS::StackName' ] ]
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremPublicRouteTable-', !Ref 'AWS::StackName' ] ]
+        - Key: Network
+          Value: Public
+      VpcId: !Ref Vpc
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremVpc-', !Ref 'AWS::StackName' ] ]
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for app server
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+        - Description: allow outbound HTTPS to the VPC
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+          SourceSecurityGroupId: !Ref CGWSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "OnPremAppServerSecurityGroup-${AWS::StackName}"
+      VpcId:
+        !Ref Vpc
+
+  CGWSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for CGW instances
+      Tags:
+        - Key: Name
+          Value: !Sub "OnPremCGWSecurityGroup-${AWS::StackName}"
+      VpcId:
+        !Ref Vpc
+
+  DCServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join
+        - "-"
+        - - Ref: AWS::StackName
+          - "SSMRole"
+          - Ref: AWS::Region
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  DCInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref DCServerRole
+
+  AppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile:
+        Ref: DCInstanceProfile
+      SecurityGroupIds:
+        - !Ref AppServerSecurityGroup
+      SubnetId: !Ref PrivateSubnet0
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # install updates
+          yum update -y
+
+          # configure AWS CLI for ec2-user
+          mkdir /home/ec2-user/.aws
+          cat > /home/ec2-user/.aws/config<< EOF
+          [default]
+          region = ${AWS::Region}
+          EOF
+
+          chown -r ec2-user:ec2-user /home/ec2-user/.aws
+
+          # set up web server
+          yum install -y httpd
+          echo "Hello, world." > /var/www/html/index.html
+          systemctl enable httpd.service
+          systemctl start httpd.service
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremAppServer-', !Ref 'AWS::StackName' ] ]
+
+  CGWAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  AssociateCGW:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt CGWAddress.AllocationId
+      NetworkInterfaceId: !Ref CGWPubInterface
+  CGWPubInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PublicSubnet0
+      Description: Interface for controlling traffic such as SSH
+      GroupSet: 
+      - !Ref CGWSecurityGroup
+      SourceDestCheck: false
+  
+  CGWPrivInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref PrivateSubnet0
+      Description: Interface for controlling traffic such as SSH
+      GroupSet: 
+      - !Ref CGWSecurityGroup
+      SourceDestCheck: true
+
+
+  CGW:
+    Type: AWS::EC2::Instance
+    DependsOn:
+    - PublicRoute
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile:
+        Ref: DCInstanceProfile
+      # SecurityGroupIds:
+      #   - !Ref CGWSecurityGroup
+      # SubnetId: !Ref PublicSubnet0
+      SourceDestCheck: false
+      NetworkInterfaces:
+      - NetworkInterfaceId: !Ref CGWPubInterface
+        DeviceIndex: 0
+      # - NetworkInterfaceId: !Ref CGWPrivInterface
+      #   DeviceIndex: 1
+      UserData:
+        Fn::Base64: !Sub 
+          - |
+              #!/bin/bash
+              # install updates
+
+              yum update -y
+
+              sudo amazon-linux-extras install epel
+
+              # This Script configs strongswan and Quagga on Centos 7
+              # CHANGE THE VARIABLES BELOW
+              HOSTNAME="CGW01"
+              TUNNEL_NAME="AWS1"
+              TUNNEL_ID="vti11"
+              TUNNEL_LOCAL_IP="${local}"
+              TUNNEL_PEER_IP="${remote}"
+              ETH0_IP=$(hostname -I)
+              ETH0_PUBLIC="${CGWAddress}"
+              REMOTE_INSIDE_IP="${VPNOutsideIP.OutsideIpAddress1}"
+              REMOTE_PEER_IP="${VPNOutsideIP.OutsideIpAddress1}"
+              MARK="11"
+              PSK="E3nwNcd5681cJYkFq_X3GW8WNSJjufTE"
+
+              # Install and Configure Strongswan
+              echo "configuration strongswan"
+              yum install -y epel-release
+              yum install strongswan -y
+              systemctl enable --now strongswan
+
+              echo 'Configuring interface'
+              echo "DEVICE=$TUNNEL_ID
+              BOOTPROTO=none
+              ONBOOT=yes
+              TYPE=IPIP
+              PEER_INNER_IPADDR=$TUNNEL_PEER_IP
+              PEER_OUTER_IPADDR=$REMOTE_PEER_IP
+              MY_INNER_IPADDR=$TUNNEL_LOCAL_IP
+              dpdaction=restart
+              keyexchange=ikev2
+              MTU=1400" > /etc/sysconfig/network-scripts/ifcfg-$TUNNEL_ID
+
+
+              echo net.ipv4.conf.$TUNNEL_ID.disable_policy=1 >> /etc/sysctl.conf 
+              echo net.ipv4.ip_forward=1 >> /etc/sysctl.conf 
+              echo net.ipv4.conf.all.rp_filter = 2 >> /etc/sysctl.conf 
+              echo include /etc/strongswan/ipsec.d/*.conf >> /etc/ipsec.con
+              sed -i 's/# install_routes = yes/install_routes = no/g' /etc/strongswan/strongswan.d/charon.conf
+              iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1300
+              sysctl -p
+
+              echo "configuring tunnel"
+              echo "conn $TUNNEL_NAME
+                left=$ETH0_IP
+                leftid=$ETH0_PUBLIC
+                leftsubnet=0.0.0.0/0
+                right=$REMOTE_PEER_IP
+                rightid=$REMOTE_INSIDE_IP
+                rightsubnet=0.0.0.0/0
+                auto=start
+                authby=secret
+                keyexchange=ikev2
+                dpdaction=restart
+                mark=$MARK
+                ikelifetime=72h
+                keylife=72h
+                " >> /etc/strongswan/ipsec.conf
+              echo $ETH0_PUBLIC $REMOTE_PEER_IP : PSK "$PSK" >> /etc/strongswan/ipsec.secrets
+
+              echo "creating tunnel interface"
+              ip tunnel add $TUNNEL_ID local $ETH0_IP remote $REMOTE_PEER_IP mode vti key $MARK
+              ifup $TUNNEL_ID
+              chmod +x /etc/rc.d/rc.local
+              echo ip tunnel add $TUNNEL_ID local $ETH0_IP remote $REMOTE_PEER_IP mode vti key $MARK >> /etc/rc.d/rc.local
+
+              echo "bringing up tunnel"
+              strongswan update
+              strongswan up $TUNNEL_NAME
+
+
+              # Install Quagga
+              echo "configuring quagga"
+              yum install quagga-0.99.22.4 -y
+              # cp /usr/share/doc/quagga-0.99.22.4/zebra.conf.sample /etc/quagga/zebra.conf
+              # cp /usr/share/doc/quagga-0.99.22.4/bgpd.conf.sample /etc/quagga/bgpd.conf
+
+              echo "router bgp ${localASN}
+              bgp router-id ${local}
+              neighbor ${remote} remote-as ${remoteASN}
+              network ${VpcCidr}" >  /etc/quagga/bgpd.conf
+              systemctl start zebra
+              systemctl enable zebra
+              systemctl start bgpd
+              systemctl enable bgpd
+              chmod -R 777 /etc/quagga/
+              #setsebool zebra_write_config=1
+
+
+              echo $HOSTNAME >> /etc/hostname
+              hostname $HOSTNAME
+
+              # configure AWS CLI for ec2-user
+              mkdir /home/ec2-user/.aws
+              cat > /home/ec2-user/.aws/config<< EOF
+              [default]
+              region = ${AWS::Region}
+              EOF
+
+              chown -r ec2-user:ec2-user /home/ec2-user/.aws
+          - local : !FindInMap [RegionMap, !Ref 'AWS::Region', LocalIP1]
+            remote : !FindInMap [RegionMap, !Ref 'AWS::Region', RemoteIP1]
+            localASN : !FindInMap [RegionMap, !Ref 'AWS::Region', LocalASN]
+            remoteASN : !FindInMap [RegionMap, !Ref 'AWS::Region', RemoteASN]
+            VpcCidr: !FindInMap [RegionMap, !Ref 'AWS::Region', VpcCidr]
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremCGW-', !Ref 'AWS::StackName' ] ]
+  
+  VPNConnection: 
+    Type: AWS::EC2::VPNConnection
+    Properties: 
+      Type: ipsec.1
+      CustomerGatewayId: 
+        !Ref CustomerGateway
+      VpnTunnelOptionsSpecifications:
+        - PreSharedKey: !FindInMap
+            - RegionMap
+            - !Ref 'AWS::Region'
+            - PSK
+          TunnelInsideCidr: !FindInMap
+            - RegionMap
+            - !Ref 'AWS::Region'
+            - TunnelInsideCidr1
+        - PreSharedKey: !FindInMap
+            - RegionMap
+            - !Ref 'AWS::Region'
+            - PSK
+          TunnelInsideCidr: !FindInMap
+            - RegionMap
+            - !Ref 'AWS::Region'
+            - TunnelInsideCidr2
+      Tags:
+        - Key: Name
+          Value: !Join [ '', [ 'OnPremCGW-VPN-', !Ref 'AWS::StackName' ] ]
+  
+  CustomerGateway: 
+    Type: AWS::EC2::CustomerGateway
+    Properties: 
+        Type: ipsec.1
+        BgpAsn: !FindInMap
+          - RegionMap
+          - !Ref 'AWS::Region'
+          - LocalASN
+        IpAddress: !Ref CGWAddress
+        Tags:
+          - Key: Name
+            Value: !Join [ '', [ 'OnPremCGW-', !Ref 'AWS::StackName' ] ]
+  
+  VPNOutsideIP:
+      Type: Custom::VPNOutsideIPGenerator
+      Properties:
+        ServiceToken: !GetAtt VPNOutsideIPGenerator.Arn
+        VPNID: !Ref VPNConnection
+
+  VPNOutsideIPGenerator:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.lambda_handler"
+      Timeout: 300
+      Role: !GetAtt 'LambdaRole.Arn'
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import logging
+          import boto3
+          import sys
+          from pip._internal import main
+          main(['install', '-I', '-q', 'cfnresponse', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+          import cfnresponse
+          def lambda_handler(event, context):
+              logger = logging.getLogger()
+              logger.setLevel(logging.INFO)
+              vpn_connection_id = event['ResourceProperties'].get('VPNID', None)
+              ec2client = boto3.client('ec2')
+              response = ec2client.describe_vpn_connections(VpnConnectionIds=[ vpn_connection_id ])
+              responseData = {}
+              responseData['OutsideIpAddress1'] = response['VpnConnections'][0]['VgwTelemetry'][0]['OutsideIpAddress']
+              responseData['OutsideIpAddress2'] = response['VpnConnections'][0]['VgwTelemetry'][1]['OutsideIpAddress']
+              logger.info('responseData {}'.format(responseData))
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: lambda-vpc
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpnConnections
+                Resource:
+                  - "*"
+        
+
+Outputs:
+
+  Vpc:
+    Value: !Ref Vpc
+  PublicSubnet0:
+    Value: !Ref PublicSubnet0
+  PrivateSubnet0:
+    Value: !Ref PrivateSubnet0
+  CGWSecurityGroup:
+    Value: !Ref CGWSecurityGroup
+  CGWPublicIp:
+    Value: !Ref CGWAddress
+  CGWPrivateIp:
+    Value: !GetAtt CGW.PrivateIp
+  AppServerPrivateIp:
+    Value: !GetAtt AppServer.PrivateIp
+  VPNOutsideIP1: 
+    Description: First VPN Outside IP Address
+    Value: !GetAtt VPNOutsideIP.OutsideIpAddress1
+  VPNOutsideIP2: 
+    Description: Second VPN Outside IP Address
+    Value: !GetAtt VPNOutsideIP.OutsideIpAddress2
+
+ 
